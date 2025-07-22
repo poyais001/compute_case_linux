@@ -1,14 +1,29 @@
+# Compress balls in a stl box (with GTN damage)
+
 # MATERIAL PARAMETERS
-variable        E equal 10.0 # Young's modulus
+variable        E equal 20.0 # Young's modulus
 variable        nu equal 0.33 # Poisson ratio
 variable        rho equal 7750 # initial mass density
 variable        q1 equal 0.06 # standard artificial viscosity linear coefficient
 variable        q2 equal 0.0  # standard artificial viscosity quadratic coefficient
 variable        hg equal 10.0 # hourglass control coefficient
 variable        cp equal 1.0  # heat capacity of material -- not used here
-variable        sigma_yield equal 0.05 # plastic yield stress
-variable        hardening_para equal 0
+variable        sigma_yield equal 0.1 # plastic yield stress
+variable        hardening_para equal 0.05
 variable        contact_stiffness equal 1.5
+
+variable        GTN_Q1 equal 1.5
+variable        GTN_Q2 equal 1
+variable        GTN_fn equal 0.04
+variable        GTN_sn equal 0.1
+variable        GTN_epsn equal 0.50
+variable        GTN_f0 equal 0
+variable        GTN_fcr equal 0.15
+variable        GTN_fF equal 0.25
+variable        GTN_komega equal 5.5
+variable        GTN_Stress_Ctrl equal 1
+variable        GTN_C equal 1
+variable        GTN_sigmaN equal 0.2
 
 # INITIALIZE LAMMPS
 dimension       3
@@ -44,14 +59,16 @@ set 		    group all diameter ${h} # set SPH kernel radius
 fix             fix_vel_indenter indenter smd/setvel 0 0 -0.0005
 
 # INTERACTION PHYSICS / MATERIAL MODEL #
-pair_style      hybrid/overlay smd/tlsph smd/hertz 1.2 smd/tri_surface 1.1
+pair_style      hybrid/overlay smd/tlsph smd/hertz 1.2 smd/tri_surface 1.0
 pair_coeff      2 2 smd/tlsph *COMMON ${rho} ${E} ${nu} ${q1} ${q2} ${hg} ${cp} &
                 *STRENGTH_LINEAR_PLASTIC ${sigma_yield} ${hardening_para} &
+                *GURSON_TVERGAARD_NEEDLEMAN ${GTN_Q1} ${GTN_Q2} ${GTN_fn} ${GTN_sn} ${GTN_epsn} ${GTN_f0} ${GTN_fcr} ${GTN_fF} ${GTN_komega} ${GTN_Stress_Ctrl} ${GTN_C} ${GTN_sigmaN} &
+                *CONTINUE_INTERACTION_AFTER_FAILURE &
                 *EOS_LINEAR & 
                 *END
-pair_coeff      2 2 smd/hertz 1.1
-pair_coeff      1 2 smd/hertz ${contact_stiffness}
-pair_coeff      2 3 smd/tri_surface ${contact_stiffness}
+pair_coeff      2 2 smd/hertz 1.0 0.5
+pair_coeff      1 2 smd/hertz ${contact_stiffness} 0
+pair_coeff      2 3 smd/tri_surface 1.0
 pair_coeff      1 1 none
 pair_coeff      3 3 none
 pair_coeff      1 3 none
@@ -67,19 +84,24 @@ fix             dtfix all smd/adjust_dt 0.1
 fix             integration_fix all smd/integrate_tlsph
 
 # SPECIFY TRAJECTORY OUTPUT
-variable        dumpFreq equal 100
+variable        dumpFreq equal 1000
 compute         dt_atom all smd/tlsph/dt
-compute         epsdot tlsph smd/plastic/strain/rate
-compute         S tlsph smd/tlsph/stress # Cauchy stress tensor
-compute         E tlsph smd/tlsph/strain # Green-Lagrange strain tensor
-compute         nn all smd/tlsph/num/neighs # number of neighbors for each particle
 compute         p tlsph smd/plastic/strain
+compute         epsdot tlsph smd/plastic/strain/rate
+compute         S tlsph smd/tlsph/stress
+compute         E tlsph smd/tlsph/strain
+compute         nn all smd/tlsph/num/neighs
+compute         shape tlsph smd/tlsph/shape
+compute         orient tlsph smd/tlsph/orientation
+compute         damage tlsph smd/damage
 
-dump            dump_id inte custom ${dumpFreq} dump.csv@full_header &
+dump            dump_id inte custom ${dumpFreq} Dump_CompressBalls.csv@full_header &
                 id type mol x y z c_p &
-                c_S[7] c_S[8] &
-                c_E[7] c_E[8] &
-                vx vy vz c_dt_atom &
+                c_S[7] c_S[8] c_S[9] c_S[10] c_S[11] &
+                c_E[7] c_E[8] c_E[9] c_E[10] c_E[11] &
+                c_shape[1] c_shape[2] c_shape[3] &
+                c_orient[1] c_orient[2] c_orient[3] c_orient[4] &
+                vx vy vz c_dt_atom c_damage &
                 c_nn c_epsdot
 dump_modify     dump_id first yes
 
@@ -91,5 +113,5 @@ thermo_style    custom step dt f_dtfix v_indenter_z v_volume
 
 # RUN SIMULATION
 balance          1.1 rcb
-fix              balance_fix all balance 200 1.1 rcb
-run 150000
+fix              balance_fix all balance 5000 1.1 rcb
+run 500000
