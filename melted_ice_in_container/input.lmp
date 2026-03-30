@@ -1,0 +1,144 @@
+# ------ 2D oxidizing bar ------ #
+
+dimension          3
+units              lj
+atom_style         hybrid rheo/thermal bond smd
+boundary           m m m
+comm_modify        vel yes
+comm_style         tiled
+newton             off
+
+region             box block -25 15 -15 15 -5 25 units box
+create_box         2 box bond/types 1 extra/bond/per/atom 80 extra/special/per/atom 200
+
+region             xialiao block 1.5 10.5 -4.5 4.5 1.5 19.5 units box
+
+lattice            hcp 1
+
+create_atoms       1 region xialiao
+group              xialiao type 1
+
+set                group xialiao sph/e 0.0 # 初始热状态，sph内能设为0，内能决定了温度状态
+set                group xialiao rheo/status 1 # 初始相态，1为固体，0为液体
+
+# ------ Model parameters ------#
+
+variable           cut equal 3 # 邻域半径（核函数截断半径）
+variable           n equal 1.0 # 参考数密度
+variable           rho0 equal 1.0 # 参考密度
+variable           cs equal 1.0 # 声速
+variable           mp equal ${rho0}/${n} # 单粒子质量
+variable           zeta equal 0.05 # 人工粘性系数
+variable           kappa equal 0.1*${rho0}/${mp} # 热传导系数
+variable           dt_max equal 0.1*${cut}/${cs}/3 # 最大时间步长
+variable           eta equal 0.05 # 黏度
+variable           Cv equal 1.0 #比热容
+variable           L equal 0.1 # 潜热（控制相变吸放热）
+variable           Tf equal 1.0 # 相变温度
+
+mass               * ${mp}
+timestep           0.01
+
+pair_style         hybrid/overlay rheo ${cut} artificial/visc ${zeta} rheo/solid smd/tri_surface 1.0
+pair_coeff         1 1 rheo
+pair_coeff         1 1 rheo/solid 1.0 1.0 1.0 # 刚度 接触截止距离 法向阻尼
+pair_coeff         1 2 smd/tri_surface 1.0
+pair_coeff         2 2 none
+
+special_bonds      lj 0.0 1.0 1.0 coul 0.0 1.0 1.0
+create_bonds       many xialiao xialiao 1 0 1.5
+special_bonds      lj 0.0 1.0 1.0 coul 1.0 1.0 1.0
+
+bond_style         bpm/spring
+bond_coeff         1 1.0 1.0 1.0 # 刚度 断裂应变 阻尼
+# ------ Apply dynamics ------#
+
+# Note: surface detection is not performed on solid bodies, so cannot use surface property
+# 这里通过邻域内粒子数来识别表面，加入stl壁面粒子后会影响表面识别
+compute         coord xialiao rheo/property/atom coordination
+variable        surf atom c_coord<80
+group           surf dynamic xialiao var surf every 10
+
+# 积分器 核半径，quintic核函数，thermol热演化，shift粒子重排，识别表面和飞散粒子
+fix             1 all rheo ${cut} quintic 0 &
+                           thermal &
+                           shift exclude/type 2 &
+                           surface/detection coordination 80 30 &
+                           coordination/exclude/type 2
+# 黏度
+fix             2 all rheo/viscosity * constant ${eta}
+# 线性状态方程计算压力
+fix             3 all rheo/pressure * linear
+# 热学参数 导热系数，比热容，相变温度，潜热，相变创建键
+fix             4 all rheo/thermal conductivity * constant ${kappa} &
+                                   specific/heat * constant ${Cv} &
+                                   Tfreeze * constant ${Tf} &
+                                   latent/heat * constant ${L} &
+                                   react 1.5 1
+# 氧化层建键 最大键长 键类型 成键表面深度
+# fix             5 rbar rheo/oxidation 1.5 2 1.0
+# 底部墙
+# fix             6 all wall/harmonic ylo EDGE 2.0 1.0 1.0
+# 重力加速度
+# fix             7 all gravity 5e-5 vector 0 -1 0
+fix             7 xialiao gravity 5e-4 vector 0 0 -1
+# 固定底部粒子
+# fix             8 floor setforce 0.0 0.0 0.0
+# 加热表面，线性热源
+fix             9 surf add/heat linear 1.1 0.5
+# 固定底部粒子热状态
+# fix             10 floor add/heat constant 0 overwrite yes # fix the temperature of the floor
+# 限制二维
+# fix             11 all enforce2d
+
+compute         surf all rheo/property/atom surface
+compute         rho all rheo/property/atom rho
+compute         phase all rheo/property/atom phase
+compute         temp all rheo/property/atom temperature
+compute         eng all rheo/property/atom energy
+# compute         nbond_shell all rheo/property/atom nbond/shell
+compute         nbond_solid all nbond/atom bond/type 1
+
+# 机械应力（pair + bond）包含液体与固体粒子
+compute         sig_mech xialiao stress/atom NULL pair bond
+variable        sxx atom -c_sig_mech[1]*c_rho/${mp}
+variable        syy atom -c_sig_mech[2]*c_rho/${mp}
+variable        szz atom -c_sig_mech[3]*c_rho/${mp}
+variable        sxy atom -c_sig_mech[4]*c_rho/${mp}
+variable        sxz atom -c_sig_mech[5]*c_rho/${mp}
+variable        syz atom -c_sig_mech[6]*c_rho/${mp}
+variable        p_hyd atom -(v_sxx+v_syy+v_szz)/3.0
+variable        s_vm atom sqrt(0.5*((v_sxx-v_syy)^2 + (v_syy-v_szz)^2 + (v_szz-v_sxx)^2) + 3.0*(v_sxy^2 + v_sxz^2 + v_syz^2))
+
+# load stl surface
+# fix中没有使用groupbit，当前只能添加到已有的组而不能新建group
+
+fix             fix_stl_muju all smd/wall_surface muju_bigHole.stl 2 65535
+fix             fix_stl_pusher all smd/wall_surface pusher_rec.stl 2 65536
+
+run             0
+group           wall molecule 65535
+group           pusher molecule 65536
+
+# 被movetrisurf积分的粒子不能被其他积分器积分，因为三角面的顶点仅被改fix所移动
+# 如果被其他fix移动，会导致粒子位置和三角面位置不匹配（几何描述不同步）
+# 接触关系会使用粒子位置进行范围筛选，如果出现不匹配
+# 可能出现点接触的粒子还没有接触三角面，接触三角面的粒子被范围筛掉，进而导致直接穿透
+# fix             stl_move pusher smd/move_tri_surf *LINEAR 0.0 0.0 -0.01
+fix             force_fix_wall wall setforce 0 0 0
+fix             force_fix_pusher pusher setforce 0 0 0
+fix             vel_fix_pusher pusher smd/setvel 0 0 0 # 可以在尾部阶段清零状态
+fix             vel_fix_wall wall smd/setvel 0 0 0
+
+# ------ Output & Run ------ #
+
+thermo          100
+thermo_style    custom step time ke press atoms
+thermo_modify   flush yes
+
+dump            1 all custom 100 atomDump id type x y z vx vy vz fx fy fz &
+                c_phase c_temp c_eng c_nbond_solid c_rho c_surf c_coord v_p_hyd v_s_vm
+
+balance         1.1 rcb
+fix             balance_fix all balance 200 1.1 rcb
+run             200000
